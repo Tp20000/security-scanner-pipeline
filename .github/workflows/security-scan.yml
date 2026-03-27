@@ -1,0 +1,144 @@
+name: Security Scanner Pipeline
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  security-scan:
+    name: Run Security Scans
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install semgrep
+      
+      - name: Run Semgrep SAST
+        id: semgrep
+        continue-on-error: true
+        run: |
+          python << 'EOF'
+          from scanner.semgrep_scanner import SemgrepScanner
+          import json
+          
+          scanner = SemgrepScanner(".")
+          results = scanner.scan()
+          
+          with open("semgrep-results.json", "w") as f:
+              json.dump(results, f, indent=2)
+          
+          print(f"Semgrep found {len(results.get('findings', []))} issues")
+          EOF
+      
+      - name: Run Snyk SCA (Optional)
+        id: snyk
+        continue-on-error: true
+        run: |
+          python << 'EOF'
+          from scanner.snyk_scanner import SnykScanner
+          import json
+          
+          scanner = SnykScanner("./demo-app")
+          results = scanner.scan()
+          
+          with open("snyk-results.json", "w") as f:
+              json.dump(results, f, indent=2)
+          
+          print(f"Snyk scan: {results.get('status')}")
+          EOF
+      
+      - name: Aggregate results
+        id: aggregate
+        run: |
+          python << 'EOF'
+          from scanner.aggregator import ResultAggregator
+          import json
+          import os
+          
+          aggregator = ResultAggregator()
+          
+          with open("semgrep-results.json") as f:
+              semgrep_data = json.load(f)
+              aggregator.add_results("semgrep", semgrep_data.get("findings", []))
+          
+          with open("snyk-results.json") as f:
+              snyk_data = json.load(f)
+              aggregator.add_results("snyk", snyk_data.get("findings", []))
+          
+          results = aggregator.aggregate()
+          aggregator.export_json("aggregated-results.json")
+          
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"total_findings={results['total_findings']}\n")
+              f.write(f"critical_count={results['severity_breakdown']['CRITICAL']}\n")
+              f.write(f"high_count={results['severity_breakdown']['HIGH']}\n")
+          
+          print(f"Total findings: {results['total_findings']}")
+          print(f"Critical: {results['severity_breakdown']['CRITICAL']}")
+          print(f"High: {results['severity_breakdown']['HIGH']}")
+          EOF
+      
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: security-scan-results
+          path: |
+            semgrep-results.json
+            snyk-results.json
+            aggregated-results.json
+      
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const results = JSON.parse(fs.readFileSync('aggregated-results.json', 'utf8'));
+            
+            const body = `## 🔒 Security Scan Results
+            
+            **Total Findings:** ${results.total_findings}
+            
+            | Severity | Count |
+            |----------|-------|
+            | 🔴 Critical | ${results.severity_breakdown.CRITICAL} |
+            | 🟠 High | ${results.severity_breakdown.HIGH} |
+            | 🟡 Medium | ${results.severity_breakdown.MEDIUM} |
+            | 🟢 Low | ${results.severity_breakdown.LOW} |
+            
+            ---
+            *View detailed results in the Actions artifacts*
+            `;
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+      
+      - name: Check for critical vulnerabilities
+        if: steps.aggregate.outputs.critical_count > 0
+        run: |
+          echo "⚠️ Found ${{ steps.aggregate.outputs.critical_count }} critical vulnerabilities!"
+          echo "Review the scan results before merging."
