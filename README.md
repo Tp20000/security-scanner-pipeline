@@ -22,14 +22,3 @@ This pipeline runs automatically on every pull request and push to main.
 3. Download the **security-scan-results** artifact
 4. View `aggregated-results.json`
 
-## Tech Stack
-
-- Python 3.11
-- GitHub Actions
-- Semgrep (SAST)
-- Snyk (SCA)
-- OWASP ZAP (DAST)
-- FastAPI
-- PostgreSQL
-
-## Architecture
